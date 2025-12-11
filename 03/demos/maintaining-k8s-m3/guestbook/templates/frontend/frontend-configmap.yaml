@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-frontend-content
+data:
+  nginx.conf: |
+    server {
+        listen 80;
+        server_name localhost;
+
+        location / {
+            root /usr/share/nginx/html;
+            index index.html;
+        }
+
+        location /api/ {
+            proxy_pass http://{{ .Release.Name }}-backend:5000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Frontend-Pod $hostname;
+        }
+    }
+
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Guestbook - v{{ .Chart.AppVersion }}</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                max-width: 600px;
+                margin: 50px auto;
+                padding: 20px;
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                color: white;
+            }
+            .container {
+                background: rgba(255, 255, 255, 0.1);
+                padding: 30px;
+                border-radius: 10px;
+                backdrop-filter: blur(10px);
+            }
+            h1 { margin-top: 0; }
+            .version {
+                font-size: 18px;
+                font-weight: bold;
+                background: rgba(255, 255, 255, 0.3);
+                padding: 8px 16px;
+                border-radius: 20px;
+                display: inline-block;
+                margin-bottom: 20px;
+            }
+            button {
+                background: white;
+                color: #764ba2;
+                border: none;
+                padding: 10px 20px;
+                font-size: 16px;
+                border-radius: 5px;
+                cursor: pointer;
+                margin-top: 20px;
+            }
+            button:hover { background: #f0f0f0; }
+            button.reset-button {
+                background: #ff6b6b;
+                color: white;
+                margin-left: 10px;
+            }
+            button.reset-button:hover { background: #ff5252; }
+            #counter {
+                font-size: 48px;
+                font-weight: bold;
+                margin: 20px 0;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Kubernetes Guestbook</h1>
+            <div class="version">Version {{ .Chart.AppVersion }}</div>
+            <p>This is a multi-tier application demonstrating:</p>
+            <ul>
+                <li>Frontend: Nginx ({{ .Values.frontend.replicaCount }} replicas)</li>
+                <li>Backend: Python API ({{ .Values.backend.replicaCount }} replicas)</li>
+                <li>Database: Redis (persistent storage)</li>
+            </ul>
+            <div id="counter">Loading...</div>
+            <button onclick="incrementCounter()">Increment Counter</button>
+            <button class="reset-button" onclick="resetCounter()">Reset Counter</button>
+            <div style="margin-top: 20px; font-size: 12px;">
+                <strong>Request handled by:</strong><br>
+                Backend Pod: <span id="backend-pod">Unknown</span>
+            </div>
+        </div>
+        <script>
+            async function getCounter() {
+                try {
+                    const response = await fetch('/api/counter');
+                    const data = await response.json();
+                    document.getElementById('counter').textContent = 'Visits: ' + data.counter;
+                    document.getElementById('backend-pod').textContent = data.backend_pod;
+                } catch (e) {
+                    document.getElementById('counter').textContent = 'Backend unavailable';
+                    console.error('Error:', e);
+                }
+            }
+            async function incrementCounter() {
+                try {
+                    await fetch('/api/counter', { method: 'POST' });
+                    getCounter();
+                } catch (e) {
+                    alert('Failed to increment counter');
+                }
+            }
+            async function resetCounter() {
+                try {
+                    await fetch('/api/counter/reset', { method: 'POST' });
+                    getCounter();
+                } catch (e) {
+                    alert('Failed to reset counter');
+                }
+            }
+            getCounter();
+            setInterval(getCounter, 5000);
+        </script>
+    </body>
+    </html>

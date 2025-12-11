@@ -1,0 +1,59 @@
+# Default values for guestbook
+
+# Frontend configuration
+frontend:
+  replicaCount: 6
+  image:
+    repository: nginx
+    tag: "1.25"
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "100m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+# Backend API configuration
+backend:
+  replicaCount: 4
+  image:
+    repository: python
+    tag: "3.11-slim"
+  service:
+    type: ClusterIP
+    port: 5000
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# Redis configuration
+redis:
+  image:
+    repository: redis
+    tag: "7-alpine"
+  service:
+    type: ClusterIP
+    port: 6379
+  persistence:
+    size: 1Gi
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"

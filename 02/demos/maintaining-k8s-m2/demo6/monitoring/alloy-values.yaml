@@ -1,0 +1,60 @@
+# Deploy as DaemonSet (one pod per node)
+controller:
+  type: "daemonset"
+
+# Alloy configuration (combined configMap and extraEnv)
+alloy:
+  configMap:
+    content: |-
+      // Discover all pods in the cluster
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      // Filter to only collect logs from pods on the same node as this Alloy instance
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        // Only scrape pods on the same node
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          regex         = env("HOSTNAME")
+          action        = "keep"
+        }
+
+        // Add useful labels
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+      }
+
+      // Collect logs from discovered pods
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.write.loki.receiver]
+      }
+
+      // Send logs to Loki
+      loki.write "loki" {
+        endpoint {
+          url = "http://loki-gateway.monitoring.svc.cluster.local:80/loki/api/v1/push"
+        }
+      }
+
+  # Use environment variable for node name
+  extraEnv:
+    - name: HOSTNAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName

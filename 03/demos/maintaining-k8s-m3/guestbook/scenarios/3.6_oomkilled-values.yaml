@@ -1,0 +1,54 @@
+# Troubleshooting Scenario: OOMKilled
+# This scenario demonstrates pods being killed due to exceeding
+# memory limits. The memory limit is set too low for the application to start.
+#
+# Deploy with: helm upgrade guestbook ./demo-app -f scenarios/oomkilled-values.yaml
+# Revert with: helm upgrade guestbook ./demo-app --reset-values
+
+# Backend configuration - memory limit too low
+backend:
+  replicaCount: 2  # Reduced replicas to make scenario clearer
+  image:
+    repository: python
+    tag: "3.11-slim"
+  service:
+    type: ClusterIP
+    port: 5000
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "100m"
+    limits:
+      memory: "32Mi"  # BROKEN: Too low for Flask + dependencies (~100-150Mi needed)
+      cpu: "200m"
+  appVersion: "2.1.4"
+  podDisruptionBudget:
+    enabled: false  # Disabled for troubleshooting scenario
+
+# Frontend - keep it working to show partial system failure
+frontend:
+  replicaCount: 2
+  image:
+    repository: nginx
+    tag: "1.25"
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "100m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+  podDisruptionBudget:
+    enabled: false
+
+# Redis - keep it working
+redis:
+  image:
+    repository: redis
+    tag: "7-alpine"
+  persistence:
+    enabled: true
+    size: 1Gi

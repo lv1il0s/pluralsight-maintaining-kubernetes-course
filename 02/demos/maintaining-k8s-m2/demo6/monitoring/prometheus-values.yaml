@@ -1,0 +1,18 @@
+# Prometheus persistent storage configuration
+prometheus:
+  prometheusSpec:
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ebs-sc
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+# Grafana persistent storage (bonus - fixes dashboard persistence too!)
+grafana:
+  persistence:
+    enabled: true
+    storageClassName: ebs-sc
+    size: 5Gi

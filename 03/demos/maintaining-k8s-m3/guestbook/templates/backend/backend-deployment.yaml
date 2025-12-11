@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-backend
+  labels:
+    app: {{ .Chart.Name }}-backend
+    tier: backend
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}-backend
+      tier: backend
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/backend/backend-configmap.yaml") . | sha256sum }}
+      labels:
+        app: {{ .Chart.Name }}-backend
+        tier: backend
+        app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  tier: backend
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: backend
+        image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+        command:
+        - "/bin/sh"
+        - "-c"
+        - |
+          pip install --no-cache-dir -r /app/requirements.txt
+          python -u /app/server.py
+        ports:
+        - containerPort: 5000
+        env:
+        - name: REDIS_HOST
+          value: {{ .Values.backend.redisHost | default (printf "%s-redis" .Release.Name) }}
+        - name: REDIS_PORT
+          value: "6379"
+        - name: APP_VERSION
+          value: {{ .Chart.AppVersion | quote }}
+        resources:
+          {{- toYaml .Values.backend.resources | nindent 10 }}
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        volumeMounts:
+        - name: backend-code
+          mountPath: /app
+      volumes:
+      - name: backend-code
+        configMap:
+          name: {{ .Release.Name }}-backend-code

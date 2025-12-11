@@ -1,0 +1,54 @@
+# Troubleshooting Scenario: ImagePullBackOff
+# This scenario demonstrates a backend deployment that fails because
+# the container image tag doesn't exist.
+#
+# Deploy with: helm upgrade guestbook ./demo-app -f scenarios/imagepullbackoff-values.yaml
+# Revert with: helm upgrade guestbook ./demo-app --reset-values
+
+# Backend configuration - intentionally misconfigured
+backend:
+  replicaCount: 2  # Reduced replicas to make scenario clearer
+  image:
+    repository: python
+    tag: "99.99.99-nonexistent"  # BROKEN: This tag doesn't exist
+  service:
+    type: ClusterIP
+    port: 5000
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  appVersion: "2.1.4"
+  podDisruptionBudget:
+    enabled: false  # Disabled for troubleshooting scenario
+
+# Frontend - keep it working to show partial system failure
+frontend:
+  replicaCount: 2
+  image:
+    repository: nginx
+    tag: "1.25"
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "100m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+  podDisruptionBudget:
+    enabled: false
+
+# Redis - keep it working
+redis:
+  image:
+    repository: redis
+    tag: "7-alpine"
+  persistence:
+    enabled: true
+    size: 1Gi

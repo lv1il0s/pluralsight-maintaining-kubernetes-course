@@ -1,0 +1,58 @@
+# Troubleshooting Scenario: Networking/Service Connectivity
+# This scenario demonstrates service connectivity issues due to
+# misconfigured service selector.
+#
+# Deploy with: helm upgrade guestbook ./demo-app -f scenarios/networking-values.yaml
+# Revert with: helm upgrade guestbook ./demo-app --reset-values
+
+# Backend configuration - service selector misconfigured
+backend:
+  replicaCount: 2
+  image:
+    repository: python
+    tag: "3.11-slim"
+  service:
+    type: ClusterIP
+    port: 5000
+    # BROKEN: Wrong selector - doesn't match pod labels
+    selector:
+      app: wrong-app-name
+      tier: backend
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  appVersion: "2.1.4"
+  podDisruptionBudget:
+    enabled: false
+
+# Frontend - keep it working but it won't reach backend
+frontend:
+  replicaCount: 2
+  image:
+    repository: nginx
+    tag: "1.25"
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "100m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+  podDisruptionBudget:
+    enabled: false
+
+# Redis - keep it working
+redis:
+  image:
+    repository: redis
+    tag: "7-alpine"
+  persistence:
+    enabled: true
+    size: 1Gi

@@ -1,0 +1,323 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-backend-code
+data:
+  server.py: |
+    from flask import Flask, jsonify, request
+    from flask_cors import CORS
+    from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+    import redis
+    import os
+    import socket
+    import time
+    import sys
+    import logging
+    import json
+    import random
+
+    app = Flask(__name__)
+    CORS(app)
+
+    # Configure structured JSON logging
+    class JsonFormatter(logging.Formatter):
+        def format(self, record):
+            log_data = {
+                'timestamp': self.formatTime(record, self.datefmt),
+                'level': record.levelname,
+                'message': record.getMessage(),
+                'pod': socket.gethostname()
+            }
+            # Add extra fields if present
+            if hasattr(record, 'event'):
+                log_data['event'] = record.event
+            if hasattr(record, 'counter'):
+                log_data['counter'] = record.counter
+            if hasattr(record, 'frontend_pod'):
+                log_data['frontend_pod'] = record.frontend_pod
+            if hasattr(record, 'error'):
+                log_data['error'] = record.error
+            return json.dumps(log_data)
+
+    # Set up logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JsonFormatter())
+    logger.addHandler(handler)
+    # Disable Flask's default logger to avoid duplicate logs
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+    # Connect to Redis
+    redis_host = os.getenv('REDIS_HOST', 'localhost')
+    redis_port = int(os.getenv('REDIS_PORT', 6379))
+    app_version = os.getenv('APP_VERSION', '1.0.0')
+
+    r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+    hostname = socket.gethostname()
+
+    # Test Redis connection on startup
+    logger.info(f"Testing Redis connection to {redis_host}:{redis_port}")
+    try:
+        r.ping()
+        logger.info("Redis connection successful", extra={'event': 'redis_connection_success'})
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis: {e}", extra={'event': 'redis_connection_failed', 'error': str(e)})
+        logger.error(f"Host: {redis_host}:{redis_port}")
+        logger.error("Application cannot start without Redis")
+        sys.exit(1)
+
+    # Prometheus Metrics
+    request_count = Counter('guestbook_requests_total', 'Total number of requests', ['method', 'endpoint', 'status'])
+    counter_increments = Counter('guestbook_counter_increments_total', 'Total number of counter increments')
+    request_duration = Histogram('guestbook_request_duration_seconds', 'Request duration in seconds', ['method', 'endpoint'])
+    current_counter_value = Gauge('guestbook_counter_value', 'Current counter value from Redis')
+    redis_errors = Counter('guestbook_redis_errors_total', 'Total Redis errors')
+    chaos_injections = Counter('guestbook_chaos_injections_total', 'Total chaos injections', ['type'])
+    slo_violations = Counter('guestbook_slo_violations_total', 'SLO violations', ['type'])
+
+    # Chaos Engineering State
+    def get_chaos_config():
+        """Get current chaos configuration from Redis"""
+        try:
+            enabled = r.get('chaos:enabled')
+            if enabled == '1':
+                return {
+                    'enabled': True,
+                    'mode': r.get('chaos:mode') or 'none',
+                    'intensity': int(r.get('chaos:intensity') or 50)
+                }
+        except:
+            pass
+        return {'enabled': False, 'mode': 'none', 'intensity': 0}
+
+    def apply_chaos():
+        """Apply chaos engineering based on current configuration"""
+        if request.path.startswith('/api/chaos') or request.path == '/health' or request.path == '/metrics':
+            return None  # Don't apply chaos to chaos control or monitoring endpoints
+
+        chaos = get_chaos_config()
+        if not chaos['enabled']:
+            return None
+
+        mode = chaos['mode']
+        intensity = chaos['intensity']
+
+        # Latency injection
+        if mode == 'latency':
+            if random.randint(1, 100) <= intensity:
+                delay = random.uniform(0.2, 0.5)  # 200-500ms delay
+                logger.warning(f"CHAOS: Injecting {delay:.2f}s latency", extra={'event': 'chaos_latency'})
+                time.sleep(delay)
+                chaos_injections.labels(type='latency').inc()
+                slo_violations.labels(type='latency').inc()
+
+        # Error injection
+        elif mode == 'errors':
+            if random.randint(1, 100) <= intensity:
+                logger.error("CHAOS: Injecting 500 error", extra={'event': 'chaos_error'})
+                chaos_injections.labels(type='error').inc()
+                slo_violations.labels(type='availability').inc()
+
+                # Manually record the 500 error metric since after_request won't be called
+                if hasattr(request, 'start_time'):
+                    duration = time.time() - request.start_time
+                    request_duration.labels(method=request.method, endpoint=request.path).observe(duration)
+                    request_count.labels(method=request.method, endpoint=request.path, status=500).inc()
+
+                return jsonify({'error': 'Chaos engineering: simulated error'}), 500
+
+        # Crash injection
+        elif mode == 'crash':
+            if random.randint(1, 100) <= intensity:
+                logger.critical(f"CHAOS: CRASHING POD NOW (pod={hostname})", extra={'event': 'chaos_crash'})
+                chaos_injections.labels(type='crash').inc()
+                # Force immediate exit - bypasses Flask exception handling
+                # This causes the container to crash and Kubernetes will restart it
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(1)
+
+        return None
+
+    @app.before_request
+    def before_request():
+        request.start_time = time.time()
+
+        # Apply chaos engineering
+        chaos_response = apply_chaos()
+        if chaos_response:
+            return chaos_response
+
+    @app.after_request
+    def after_request(response):
+        if hasattr(request, 'start_time'):
+            duration = time.time() - request.start_time
+            request_duration.labels(method=request.method, endpoint=request.path).observe(duration)
+            request_count.labels(method=request.method, endpoint=request.path, status=response.status_code).inc()
+
+            # Track SLO violations (latency > 200ms or 5xx errors)
+            if duration > 0.2:
+                slo_violations.labels(type='latency').inc()
+            if response.status_code >= 500:
+                slo_violations.labels(type='availability').inc()
+        return response
+
+    @app.route('/api/counter', methods=['GET'])
+    def get_counter():
+        try:
+            counter = r.get('visit_counter')
+            if counter is None:
+                r.set('visit_counter', 0)
+                counter = 0
+            counter = int(counter)
+            current_counter_value.set(counter)
+            frontend_pod = request.headers.get('X-Frontend-Pod', 'Unknown')
+            logger.info("Counter retrieved", extra={
+                'event': 'counter_retrieved',
+                'counter': counter,
+                'frontend_pod': frontend_pod
+            })
+            return jsonify({
+                'counter': counter,
+                'backend_pod': hostname,
+                'frontend_pod': frontend_pod,
+                'version': app_version
+            })
+        except Exception as e:
+            redis_errors.inc()
+            logger.error("Error retrieving counter", extra={
+                'event': 'counter_retrieve_error',
+                'error': str(e)
+            })
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/counter', methods=['POST'])
+    def increment_counter():
+        try:
+            counter = r.incr('visit_counter')
+            counter_increments.inc()
+            current_counter_value.set(counter)
+            frontend_pod = request.headers.get('X-Frontend-Pod', 'Unknown')
+            logger.info("Button clicked - counter incremented", extra={
+                'event': 'button_clicked',
+                'counter': counter,
+                'frontend_pod': frontend_pod
+            })
+            return jsonify({
+                'counter': counter,
+                'backend_pod': hostname,
+                'frontend_pod': frontend_pod,
+                'version': app_version
+            })
+        except Exception as e:
+            redis_errors.inc()
+            logger.error("Error incrementing counter", extra={
+                'event': 'counter_increment_error',
+                'error': str(e)
+            })
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/counter/reset', methods=['POST'])
+    def reset_counter():
+        try:
+            r.set('visit_counter', 0)
+            current_counter_value.set(0)
+            frontend_pod = request.headers.get('X-Frontend-Pod', 'Unknown')
+            logger.info("Counter reset", extra={
+                'event': 'counter_reset',
+                'counter': 0,
+                'frontend_pod': frontend_pod
+            })
+            return jsonify({
+                'counter': 0,
+                'backend_pod': hostname,
+                'frontend_pod': frontend_pod,
+                'version': app_version
+            })
+        except Exception as e:
+            redis_errors.inc()
+            logger.error("Error resetting counter", extra={
+                'event': 'counter_reset_error',
+                'error': str(e)
+            })
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/chaos/enable', methods=['POST'])
+    def enable_chaos():
+        """Enable chaos engineering
+        Request body: {"mode": "latency|errors|crash", "intensity": 1-100}
+        """
+        try:
+            data = request.get_json() or {}
+            mode = data.get('mode', 'latency')
+            intensity = data.get('intensity', 50)
+
+            if mode not in ['latency', 'errors', 'crash']:
+                return jsonify({'error': 'Invalid mode. Must be: latency, errors, or crash'}), 400
+            if not 1 <= intensity <= 100:
+                return jsonify({'error': 'Intensity must be between 1-100'}), 400
+
+            r.set('chaos:enabled', '1')
+            r.set('chaos:mode', mode)
+            r.set('chaos:intensity', intensity)
+
+            logger.warning(f"CHAOS ENABLED: mode={mode}, intensity={intensity}%", extra={'event': 'chaos_enabled', 'mode': mode, 'intensity': intensity})
+            return jsonify({
+                'status': 'enabled',
+                'mode': mode,
+                'intensity': intensity,
+                'pod': hostname,
+                'message': f'Chaos mode {mode} enabled at {intensity}% intensity'
+            })
+        except Exception as e:
+            logger.error(f"Error enabling chaos: {str(e)}", extra={'event': 'chaos_enable_error', 'error': str(e)})
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/chaos/disable', methods=['POST'])
+    def disable_chaos():
+        """Disable chaos engineering"""
+        try:
+            r.delete('chaos:enabled', 'chaos:mode', 'chaos:intensity')
+            logger.info("CHAOS DISABLED", extra={'event': 'chaos_disabled'})
+            return jsonify({
+                'status': 'disabled',
+                'pod': hostname,
+                'message': 'Chaos mode disabled'
+            })
+        except Exception as e:
+            logger.error(f"Error disabling chaos: {str(e)}", extra={'event': 'chaos_disable_error', 'error': str(e)})
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/chaos/status', methods=['GET'])
+    def chaos_status():
+        """Get current chaos engineering status"""
+        try:
+            chaos = get_chaos_config()
+            return jsonify({
+                'pod': hostname,
+                'chaos': chaos
+            })
+        except Exception as e:
+            logger.error(f"Error getting chaos status: {str(e)}", extra={'event': 'chaos_status_error', 'error': str(e)})
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/health', methods=['GET'])
+    def health():
+        return jsonify({'status': 'healthy', 'version': app_version})
+
+    @app.route('/metrics', methods=['GET'])
+    def metrics():
+        return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+
+    if __name__ == '__main__':
+        logger.info(f"Starting Guestbook Backend - Version {app_version}", extra={'event': 'app_startup'})
+        logger.info(f"Running on pod: {hostname}", extra={'event': 'app_startup'})
+        logger.info("Prometheus metrics available at /metrics", extra={'event': 'app_startup'})
+        app.run(host='0.0.0.0', port=5000)
+
+  requirements.txt: |
+    flask==3.0.0
+    flask-cors==4.0.0
+    redis==5.0.1
+    prometheus-client==0.19.0

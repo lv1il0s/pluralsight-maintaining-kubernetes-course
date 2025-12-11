@@ -1,0 +1,54 @@
+# Troubleshooting Scenario: Pending Pods
+# This scenario demonstrates pods that can't be scheduled because
+# resource requests exceed what's available on any node.
+#
+# Deploy with: helm upgrade guestbook ./demo-app -f scenarios/pending-values.yaml
+# Revert with: helm upgrade guestbook ./demo-app --reset-values
+
+# Backend configuration - intentionally misconfigured
+backend:
+  replicaCount: 2  # Reduced replicas to make scenario clearer
+  image:
+    repository: python
+    tag: "3.11-slim"
+  service:
+    type: ClusterIP
+    port: 5000
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "8000m"  # BROKEN: Requesting 8 CPUs (nodes only have ~2 CPUs)
+    limits:
+      memory: "256Mi"
+      cpu: "8000m"
+  appVersion: "2.1.4"
+  podDisruptionBudget:
+    enabled: false  # Disabled for troubleshooting scenario
+
+# Frontend - keep it working to show partial system failure
+frontend:
+  replicaCount: 2
+  image:
+    repository: nginx
+    tag: "1.25"
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "100m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+  podDisruptionBudget:
+    enabled: false
+
+# Redis - keep it working
+redis:
+  image:
+    repository: redis
+    tag: "7-alpine"
+  persistence:
+    enabled: true
+    size: 1Gi
