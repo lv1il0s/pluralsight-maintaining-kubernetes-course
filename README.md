@@ -1,6 +1,6 @@
 # Maintaining, Monitoring and Troubleshooting Kubernetes
 
-Supporting materials for the Pluralsight course **"Maintaining, Monitoring and Troubleshooting Kubernetes"**.
+Supporting materials for the Pluralsight course [Maintaining, Monitoring and Troubleshooting Kubernetes](http://www.pluralsight.com/courses/maintaining-monitoring-troubleshoot-kubernetes)
 
 ---
 
