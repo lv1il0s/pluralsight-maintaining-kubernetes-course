@@ -16,7 +16,7 @@ Supporting materials for the Pluralsight course [Maintaining, Monitoring and Tro
 
 If you want to follow along with the course using your own AWS Kubernetes cluster, see:
 
-**[docs/aws-cluster-setup.md](docs/aws-cluster-setup.md)**
+**[docs/student-aws-cluster-setup-guide.md](docs/student-aws-cluster-setup-guide.md)**
 
 This guide walks you through building a production-like kubeadm cluster on AWS (approximately 30 minutes from scratch).
 
