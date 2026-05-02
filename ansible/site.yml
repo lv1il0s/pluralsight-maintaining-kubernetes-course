@@ -1,0 +1,304 @@
+---
+# Bootstraps a kubeadm cluster on top of the EC2 instances created by
+# ../terraform/main.tf. Implements Steps 4-9 of
+# docs/student-aws-cluster-setup-guide.md.
+#
+# Usage:
+#   ./generate-inventory.sh        # writes inventory.yml from terraform outputs
+#   ansible-playbook site.yml
+
+###############################################################################
+# Play 1 — Initialise control plane, regenerate API cert, install Calico
+###############################################################################
+- name: Bootstrap control plane
+  hosts: control_plane
+  become: true
+  gather_facts: true
+  vars:
+    admin_kubeconfig: /etc/kubernetes/admin.conf
+
+  tasks:
+    - name: Ensure k8s-api.local resolves to loopback on the control plane
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\sk8s-api\.local$'
+        line: "127.0.0.1 k8s-api.local"
+        state: present
+
+    - name: Detect existing cluster initialisation
+      ansible.builtin.stat:
+        path: "{{ admin_kubeconfig }}"
+      register: admin_conf
+
+    - name: kubeadm init
+      ansible.builtin.command:
+        cmd: >-
+          kubeadm init
+          --control-plane-endpoint={{ api_server_endpoint }}
+          --pod-network-cidr={{ pod_network_cidr }}
+          --node-name={{ inventory_hostname }}
+          --upload-certs
+      when: not admin_conf.stat.exists
+      register: kubeadm_init
+      changed_when: kubeadm_init.rc == 0
+
+    - name: Ensure ubuntu user has a ~/.kube directory
+      ansible.builtin.file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Place admin kubeconfig at /home/ubuntu/.kube/config
+      ansible.builtin.copy:
+        src: "{{ admin_kubeconfig }}"
+        dest: /home/ubuntu/.kube/config
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+        remote_src: true
+
+    - name: Write kubeadm config patch with extra certSANs
+      ansible.builtin.copy:
+        dest: /tmp/kubeadm-config-patch.yaml
+        mode: "0644"
+        content: |
+          apiVersion: kubeadm.k8s.io/v1beta4
+          kind: ClusterConfiguration
+          apiServer:
+            certSANs:
+              - "{{ elastic_ip }}"
+              - "k8s-api.local"
+              - "{{ control_plane_private_ip }}"
+
+    - name: Check whether the elastic IP is already a SAN on the apiserver cert
+      ansible.builtin.command:
+        cmd: openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text
+      register: apiserver_cert
+      changed_when: false
+
+    - name: Regenerate apiserver cert when the elastic IP is missing
+      when: ('IP Address:' ~ elastic_ip) not in apiserver_cert.stdout
+      block:
+        - name: Remove existing apiserver cert + key
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/kubernetes/pki/apiserver.crt
+            - /etc/kubernetes/pki/apiserver.key
+
+        - name: kubeadm init phase certs apiserver
+          ansible.builtin.command:
+            cmd: kubeadm init phase certs apiserver --config /tmp/kubeadm-config-patch.yaml
+
+        - name: Stop kube-apiserver pod so kubelet recreates it with the new cert
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              POD=$(crictl pods --name kube-apiserver -q | head -n1)
+              if [ -n "$POD" ]; then crictl stopp "$POD" >/dev/null; fi
+          changed_when: true
+
+        - name: Wait for the apiserver to come back ready
+          ansible.builtin.command:
+            cmd: kubectl --kubeconfig {{ admin_kubeconfig }} get --raw=/readyz
+          register: apiserver_readyz
+          retries: 30
+          delay: 5
+          until: apiserver_readyz.rc == 0
+          changed_when: false
+
+    - name: Generate a fresh kubeadm join command for the workers
+      ansible.builtin.command:
+        cmd: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+
+    - name: Stash join command for the workers play
+      ansible.builtin.set_fact:
+        kubeadm_join_command: "{{ join_command.stdout }}"
+
+    - name: Apply the Calico CNI manifest
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ admin_kubeconfig }} apply -f
+          https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml
+      register: calico_apply
+      changed_when: "'created' in calico_apply.stdout or 'configured' in calico_apply.stdout"
+
+    - name: Restart containerd (CNI initialisation)
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+
+    - name: Restart kubelet (CNI initialisation)
+      ansible.builtin.systemd:
+        name: kubelet
+        state: restarted
+
+    - name: Wait for the control plane node to report Ready
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ admin_kubeconfig }} get node
+          -l node-role.kubernetes.io/control-plane
+          -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}'
+      register: cp_ready
+      retries: 30
+      delay: 10
+      until: cp_ready.stdout == "True"
+      changed_when: false
+
+    - name: Fetch admin.conf to the local machine
+      ansible.builtin.fetch:
+        src: "{{ admin_kubeconfig }}"
+        dest: "{{ local_kubeconfig_path }}"
+        flat: true
+
+    - name: Rewrite the local kubeconfig server URL to use the elastic IP
+      delegate_to: localhost
+      become: false
+      ansible.builtin.replace:
+        path: "{{ local_kubeconfig_path }}"
+        regexp: 'server:\s*https://[^\s]+'
+        replace: "server: https://{{ elastic_ip }}:6443"
+
+###############################################################################
+# Play 2 — Join workers
+###############################################################################
+- name: Join workers to the cluster
+  hosts: workers
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Point k8s-api.local at the control plane private IP
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\sk8s-api\.local$'
+        line: "{{ control_plane_private_ip }} k8s-api.local"
+        state: present
+
+    - name: Detect whether this node has already joined
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Reset and join
+      when: not kubelet_conf.stat.exists
+      block:
+        - name: kubeadm reset (defensive, idempotent)
+          ansible.builtin.command:
+            cmd: kubeadm reset -f
+          changed_when: true
+
+        - name: Wipe any leftover CNI config
+          ansible.builtin.file:
+            path: /etc/cni/net.d
+            state: absent
+
+        - name: Flush iptables
+          ansible.builtin.shell:
+            cmd: |
+              iptables -F
+              iptables -t nat -F
+              iptables -t mangle -F
+              iptables -X
+          changed_when: true
+
+        - name: kubeadm join
+          ansible.builtin.command:
+            cmd: >-
+              {{ hostvars[groups['control_plane'][0]]['kubeadm_join_command'] }}
+              --node-name={{ inventory_hostname }}
+          changed_when: true
+
+    - name: Restart containerd (CNI initialisation)
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+
+    - name: Restart kubelet (CNI initialisation)
+      ansible.builtin.systemd:
+        name: kubelet
+        state: restarted
+
+###############################################################################
+# Play 3 — Verify, then install AWS EBS CSI driver + default StorageClass
+###############################################################################
+- name: Verify cluster + install EBS CSI driver
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars:
+    admin_kubeconfig: /etc/kubernetes/admin.conf
+
+  tasks:
+    - name: Wait for all nodes to report Ready
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ admin_kubeconfig }} get nodes
+          -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+      register: nodes_ready
+      retries: 30
+      delay: 10
+      until: >
+        nodes_ready.stdout_lines | length > 0 and
+        nodes_ready.stdout_lines | unique == ["True"]
+      changed_when: false
+
+    - name: Install Helm 3 if missing
+      ansible.builtin.shell:
+        cmd: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        creates: /usr/local/bin/helm
+
+    - name: Add aws-ebs-csi-driver helm repo
+      ansible.builtin.command:
+        cmd: helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+      register: helm_repo_add
+      changed_when: "'has been added' in helm_repo_add.stdout"
+      failed_when:
+        - helm_repo_add.rc != 0
+        - "'already exists' not in helm_repo_add.stderr"
+
+    - name: helm repo update
+      ansible.builtin.command:
+        cmd: helm repo update aws-ebs-csi-driver
+      changed_when: false
+
+    - name: helm upgrade --install aws-ebs-csi-driver
+      ansible.builtin.command:
+        cmd: >-
+          helm upgrade --install aws-ebs-csi-driver
+          aws-ebs-csi-driver/aws-ebs-csi-driver
+          --namespace kube-system
+          --kubeconfig {{ admin_kubeconfig }}
+      register: helm_install
+      changed_when: "'STATUS: deployed' in helm_install.stdout"
+
+    - name: Render the default gp3 StorageClass manifest
+      ansible.builtin.copy:
+        dest: /tmp/ebs-storageclass.yaml
+        mode: "0644"
+        content: |
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: ebs-sc
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+          provisioner: ebs.csi.aws.com
+          parameters:
+            type: gp3
+            encrypted: "true"
+          volumeBindingMode: WaitForFirstConsumer
+          allowVolumeExpansion: true
+          reclaimPolicy: Delete
+
+    - name: Apply the default StorageClass
+      ansible.builtin.command:
+        cmd: kubectl --kubeconfig {{ admin_kubeconfig }} apply -f /tmp/ebs-storageclass.yaml
+      register: sc_apply
+      changed_when: "'created' in sc_apply.stdout or 'configured' in sc_apply.stdout"

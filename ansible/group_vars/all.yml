@@ -1,0 +1,6 @@
+---
+kubernetes_version: "1.33.6"
+pod_network_cidr: "192.168.0.0/16"
+calico_version: "v3.29.1"
+api_server_endpoint: "k8s-api.local:6443"
+local_kubeconfig_path: "../k8s-kubeconfig"

@@ -1,0 +1,24 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/crash.log
+terraform/crash.*.log
+
+# Generated SSH key (never commit private keys)
+terraform/k8s-cluster-key.pem
+terraform/k8s-cluster-key.pub
+
+# Ansible inventory (generated from terraform output)
+ansible/inventory.yml
+
+# Cluster credentials pulled from the control plane
+k8s-kubeconfig
+
+# State for Update-DemoIps.ps1 (last-rendered IPs)
+.demo-ip-state.json

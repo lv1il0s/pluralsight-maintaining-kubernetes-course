@@ -15,7 +15,7 @@ k get pdb
 ### Part 2: Control Plane Upgrade
 
 # SSH to control plane node
-ssh -i keypair/k8s-cluster-key.pem ubuntu@35.174.232.81
+ssh -i keypair/k8s-cluster-key.pem ubuntu@<CONTROL_PLANE_IP>
 
 # Backup etcd database before upgrade
 sudo etcdctl snapshot save /home/ubuntu/etcd-snapshot-pre-upgrade-1.33.db \
@@ -121,7 +121,7 @@ k port-forward svc/guestbook-frontend 8080:80
 # Access http://localhost:8080 - app still fully operational!
 
 # SSH to worker-1
-ssh -i keypair/k8s-cluster-key.pem ubuntu@44.192.65.170
+ssh -i keypair/k8s-cluster-key.pem ubuntu@<WORKER_1_IP>
 
 # Add Kubernetes 1.34 repository
 echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
